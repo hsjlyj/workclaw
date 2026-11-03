@@ -27,58 +27,58 @@
 
 ## 项目结构
 
-\`\`\`
+```
 workclaw/
 ├── public/
-│   └── index.html              # Pages 状态仪表盘
+│   └── index.html                    # Pages 状态仪表盘
 ├── scripts/
-│   └── generate-workclaw-prompts.mjs  # 提示文件生成脚本
+│   └── generate-workclaw-prompts.mjs # 提示文件生成脚本
 ├── src/
-│   ├── index.js                # Worker 主入口 (路由 + Telegram + OpenAI)
-│   ├── kv-cache.js             # KV 缓存层 (搜索/抓取结果透明缓存)
-│   ├── r2-storage.js           # R2 对象存储层 (网页快照/上下文归档)
-│   ├── ai-inference.js         # Workers AI 推理 + 摘要 + Embedding
-│   ├── vectorize-search.js     # Vectorize 语义记忆搜索
+│   ├── index.js                      # Worker 主入口 (路由 + Telegram + OpenAI)
+│   ├── kv-cache.js                   # KV 缓存层 (搜索/抓取结果透明缓存)
+│   ├── r2-storage.js                 # R2 对象存储层 (网页快照/上下文归档)
+│   ├── ai-inference.js               # Workers AI 推理 + 摘要 + Embedding
+│   ├── vectorize-search.js           # Vectorize 语义记忆搜索
 │   └── generated/
-│       └── claw-prompts.js     # (自动生成) 系统提示
+│       └── claw-prompts.js           # (自动生成) 系统提示
 ├── test/
-│   └── worker.test.js          # 核心行为测试
-├── wrangler.jsonc              # Cloudflare Workers 配置
+│   └── worker.test.js                # 核心行为测试
+├── wrangler.jsonc                    # Cloudflare Workers 配置
 ├── package.json
-├── soul.md                     # 人格设定
-├── user.md                     # 用户偏好
-├── .env.example                # 环境变量示例
+├── soul.md                           # 人格设定
+├── user.md                           # 用户偏好
+├── .env.example                      # 环境变量示例
 └── README.md
-\`\`\`
+```
 
 ## 架构概览
 
-\`\`\`
-                     ┌─────────────────────────────────────┐
-                     │         Cloudflare Worker            │
-                     │                                       │
- Telegram ──────────▶│  /telegram/webhook                    │
- OpenAI   ──────────▶│  /v1/chat/completions                 │
- Clients  ──────────▶│  /v1/models                           │
-                     │  /cron/dispatch  (每5分钟)             │
-                     │  /api/status      (Pages 仪表盘)       │
-                     └──────────┬────────────────────────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              ▼                 ▼                 ▼
-     ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-     │  Durable     │  │  KV Cache    │  │  R2 Storage  │
-     │  Objects     │  │  (搜索/抓取)  │  │  (网页快照)   │
-     │  + SQLite    │  └──────────────┘  └──────────────┘
-     │  (会话状态)   │
-     └──────────────┘
-              │
-              ▼
-     ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-     │  Workers AI  │  │  Vectorize   │  │  Cron        │
-     │  (推理/嵌入)  │  │  (语义记忆)   │  │  (定时任务)   │
-     └──────────────┘  └──────────────┘  └──────────────┘
-\`\`\`
+```
+                      ┌─────────────────────────────────────┐
+                      │         Cloudflare Worker            │
+                      │                                       │
+  Telegram ──────────▶│  /telegram/webhook                    │
+  OpenAI   ──────────▶│  /v1/chat/completions                 │
+  Clients  ──────────▶│  /v1/models                           │
+                      │  /cron/dispatch  (每5分钟)             │
+                      │  /api/status      (Pages 仪表盘)       │
+                      └──────────┬────────────────────────────┘
+                                 │
+               ┌─────────────────┼─────────────────┐
+               ▼                 ▼                 ▼
+      ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+      │  Durable     │  │  KV Cache    │  │  R2 Storage  │
+      │  Objects     │  │  (搜索/抓取)  │  │  (网页快照)   │
+      │  + SQLite    │  └──────────────┘  └──────────────┘
+      │  (会话状态)   │
+      └──────────────┘
+               │
+               ▼
+      ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+      │  Workers AI  │  │  Vectorize   │  │  Cron        │
+      │  (推理/嵌入)  │  │  (语义记忆)   │  │  (定时任务)   │
+      └──────────────┘  └──────────────┘  └──────────────┘
+```
 
 ### 多路径回复策略
 
@@ -92,20 +92,20 @@ workclaw/
 
 ### 1. 克隆项目
 
-\`\`\`bash
-git clone <repo-url>
+```bash
+git clone https://github.com/hsjlyj/workclaw.git
 cd workclaw
-\`\`\`
+```
 
 ### 2. 安装依赖
 
-\`\`\`bash
+```bash
 npm install
-\`\`\`
+```
 
 ### 3. 配置 Cloudflare Workers 绑定
 
-\`\`\`bash
+```bash
 # KV 缓存
 npx wrangler kv namespace create WORKCLAW_CACHE
 
@@ -114,47 +114,51 @@ npx wrangler r2 bucket create workclaw-assets
 
 # Vectorize 语义搜索索引
 npx wrangler vectorize create workclaw-memories --dimensions=768 --metric=cosine
-\`\`\`
+```
 
 ### 4. 配置密钥和环境变量
 
-\`\`\`bash
+```bash
 npx wrangler secret put TELEGRAM_BOT_TOKEN
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
 npx wrangler secret put CLAW_API_KEY        # 可选，仅使用上游 API 时需要
 npx wrangler secret put OPENAI_API_KEY      # 可选
-\`\`\`
+```
 
-复制 \`.env.example\` 为 \`.dev.vars\` 用于本地开发
+复制 `.env.example` 为 `.dev.vars` 用于本地开发。
 
 ### 5. 本地启动
 
-\`\`\`bash
+```bash
 npm run dev
-\`\`\`
+```
 
 ### 6. 部署
 
-\`\`\`bash
+```bash
 npm run deploy
-\`\`\`
+```
 
 ### 7. 设置 Telegram Webhook
 
-部署后，把 Telegram Webhook 指到 \`https://<your-worker-domain>/telegram/webhook\`
+部署后，把 Telegram Webhook 指到：
+
+```
+https://<your-worker-domain>/telegram/webhook
+```
 
 ## 配置说明
 
 | 变量 / Secret | 必填 | 用途 |
 | --- | --- | --- |
-| \`TELEGRAM_BOT_TOKEN\` | 是 | Telegram Bot API 访问令牌 |
-| \`TELEGRAM_WEBHOOK_SECRET\` | 是 | webhook 校验用 secret token |
-| \`CLAW_API_KEY\` | /v1 上游模式必填 | OpenAI 兼容接口的客户端访问密钥 |
-| \`OPENAI_BASE_URL\` | 否 | 上游 OpenAI 兼容服务地址 |
-| \`OPENAI_API_KEY\` | 否 | 上游接口鉴权 Bearer token |
-| \`CLAW_MODEL\` | 否 | 优先使用的模型名 |
-| \`OPENAI_MODEL\` | 否 | CLAW_MODEL 的备用来源 |
-| \`CLAW_ENV\` | 否 | 运行环境标识 |
+| `TELEGRAM_BOT_TOKEN` | 是 | Telegram Bot API 访问令牌 |
+| `TELEGRAM_WEBHOOK_SECRET` | 是 | webhook 校验用 secret token |
+| `CLAW_API_KEY` | /v1 上游模式必填 | OpenAI 兼容接口的客户端访问密钥 |
+| `OPENAI_BASE_URL` | 否 | 上游 OpenAI 兼容服务地址 |
+| `OPENAI_API_KEY` | 否 | 上游接口鉴权 Bearer token |
+| `CLAW_MODEL` | 否 | 优先使用的模型名 |
+| `OPENAI_MODEL` | 否 | CLAW_MODEL 的备用来源 |
+| `CLAW_ENV` | 否 | 运行环境标识 |
 
 ## Telegram 交互
 
@@ -162,15 +166,15 @@ npm run deploy
 
 | 命令 | 作用 |
 | --- | --- |
-| /start | 显示帮助 |
-| /help | 显示帮助 |
-| /model | 查看当前模型、回复模式 |
-| /reset | 清空当前会话 (不清长期记忆) |
-| /todo | 管理待办事项 |
-| /remind | 管理定时提醒 |
-| /watch | 管理网页监控 |
-| /mode | 查看或切换运行模式 |
-| /summary | 查看或压缩近期摘要 |
+| `/start` | 显示帮助 |
+| `/help` | 显示帮助 |
+| `/model` | 查看当前模型、回复模式 |
+| `/reset` | 清空当前会话 (不清长期记忆) |
+| `/todo` | 管理待办事项 |
+| `/remind` | 管理定时提醒 |
+| `/watch` | 管理网页监控 |
+| `/mode` | 查看或切换运行模式 |
+| `/summary` | 查看或压缩近期摘要 |
 
 ### 按钮
 
@@ -182,19 +186,19 @@ npm run deploy
 
 ## 长期记忆
 
-\`workclaw\` 的长期记忆是**隐式自动**的，不要求用户手动管理。
+`workclaw` 的长期记忆是**隐式自动**的，不要求用户手动管理。
 
 - 只在消息像稳定事实或偏好时自动提取
 - 不在 Telegram 里暴露记忆管理命令
 - 记忆存储和短期对话分开
-- /reset 只清短期会话，不清长期记忆
+- `/reset` 只清短期会话，不清长期记忆
 - 记忆自动索引到 Vectorize，支持语义搜索
 - 每小时自动执行记忆整理和压缩
 
 ## 网络搜索与网页抓取
 
 - 搜索使用 DuckDuckGo 的 HTML 页面
-- 抓取使用普通 \`fetch\`
+- 抓取使用普通 `fetch`
 - 不依赖浏览器，也不执行网页 JavaScript
 - 搜索结果和抓取内容自动缓存到 KV
 - 大内容自动归档到 R2
@@ -207,9 +211,9 @@ npm run deploy
 
 | 命令 | 作用 |
 | --- | --- |
-| \`npm run dev\` | 本地启动 Worker |
-| \`npm test\` | 运行测试 |
-| \`npm run deploy\` | 部署到 Cloudflare Workers |
+| `npm run dev` | 本地启动 Worker |
+| `npm test` | 运行测试 |
+| `npm run deploy` | 部署到 Cloudflare Workers |
 
 ## 已知限制
 
