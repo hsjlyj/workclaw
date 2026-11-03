@@ -1785,7 +1785,7 @@ async function searchMemoriesWithVectorize(env, query, chatId) {
 async function indexMemoryInVectorize(env, memory) {
   if (!env?.WORKCLAW_VECTORIZE || !memory?.text) return;
 
-  const memoryId = `memory:${memory.id || crypto.randomUUID()}`;
+  const memoryId = `memory:${Date.now()}:${memory.id || crypto.randomUUID()}`;
   try {
     await upsertMemoryEmbedding(env, memoryId, memory.text, {
       chatId: memory.chatId || '',
@@ -2117,40 +2117,6 @@ function splitTextForStreaming(text) {
 
 function shouldEditTelegramStream(rendered, lastEdited) {
   return String(rendered || '').length - String(lastEdited || '').length >= TELEGRAM_STREAM_EDIT_MIN_CHARS;
-}
-
-// ── 多路径回复生成 ──
-// 优先级: Workers AI > 上游 OpenAI API > 本地兜底
-async function generateReplyMultiPath(prompt, env, fetchImpl) {
-  // 路径1: Workers AI (零成本, 部署后即用)
-  if (env?.WORKCLAW_AI && !getOpenAIBaseUrl(env)) {
-    try {
-      const model = getConfiguredModel(env);
-      const response = await generateWithAI(
-        [{ role: 'system', content: CLAW_SYSTEM_PROMPT || '你是一个友好的 AI 助手。' }, { role: 'user', content: prompt }],
-        env,
-        { model, temperature: 0.7, maxTokens: 1024 }
-      );
-      if (response) return response;
-    } catch (err) {
-      console.error('[AI Inference] fallback to upstream/local:', err.message);
-    }
-  }
-
-  // 路径2: 上游 OpenAI 兼容 API
-  const baseUrl = getOpenAIBaseUrl(env);
-  if (baseUrl) {
-    const webContext = await prepareWebContext(prompt, fetchImpl, env);
-    const messages = buildTelegramConversationMessages([{ role: 'user', content: prompt }], [], webContext);
-    try {
-      return await generateConversationReply(messages, env, fetchImpl);
-    } catch (err) {
-      console.error('[Upstream API] error:', err.message);
-    }
-  }
-
-  // 路径3: 本地兜底
-  return buildLocalReply(prompt);
 }
 
 function buildLocalReply(prompt) {
@@ -2651,43 +2617,14 @@ async function generateAndStreamTelegramReply({ update, session, env, fetchImpl 
 }
 
 // ── Cron 调度入口 ──
+// 注意: 每会话的定时任务（提醒/监控/记忆整理）由 TelegramSession.alarm() 处理，
+//       DO 在存储 alarm 时会自动唤醒执行。此处仅处理全局任务。
 async function handleCronDispatch(env, ctx) {
   const now = Date.now();
   const minute = new Date(now).getMinutes();
 
-  // 每 5 分钟: 检查提醒和监控
-  if (minute % 5 === 0) {
-    await runTelegramAlarmTask('reminders', async () => {
-      const session = await loadTelegramSession(ctx?.storage);
-      session.storage = ctx?.storage;
-      await deliverDueTelegramReminders(session, env, fetch);
-      await scheduleTelegramReminderAlarm(session);
-      delete session.storage;
-    });
-
-    await runTelegramAlarmTask('watches', async () => {
-      const session = await loadTelegramSession(ctx?.storage);
-      session.storage = ctx?.storage;
-      await deliverDueTelegramWatches(session, env, fetch);
-      await scheduleTelegramReminderAlarm(session);
-      delete session.storage;
-    });
-  }
-
-  // 每小时: 记忆整理和过期清理
+  // 每小时: 清理过期 Vectorize 记忆 (保留 30 天)
   if (minute === 0) {
-    await runTelegramAlarmTask('memory-compact', async () => {
-      const session = await loadTelegramSession(ctx?.storage);
-      session.storage = ctx?.storage;
-      const before = session.memories?.length ?? 0;
-      session.memories = compactTelegramMemories(Array.isArray(session.memories) ? session.memories : []);
-      if (session.memories.length < before) {
-        await saveTelegramSession(session.storage, session);
-      }
-      delete session.storage;
-    });
-
-    // 清理过期 Vectorize 记忆 (保留 30 天)
     if (env?.WORKCLAW_VECTORIZE) {
       const deleted = await deleteExpiredMemories(env, 30 * 24 * 60 * 60 * 1000);
       console.log(`[Vectorize] Cleaned up ${deleted} expired memory embeddings`);
@@ -2697,7 +2634,7 @@ async function handleCronDispatch(env, ctx) {
   return json({
     ok: true,
     triggeredAt: new Date(now).toISOString(),
-    tasks: ['reminders', 'watches', 'memory-compact'],
+    tasks: ['vectorize-cleanup'],
   });
 }
 

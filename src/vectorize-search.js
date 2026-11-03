@@ -124,10 +124,10 @@ export async function deleteExpiredMemories(env, olderThanMs) {
     const toDelete = [];
 
     for (const id of results.ids) {
-      // id 格式约定: memory:<chatId>:<timestamp>
-      const match = id.match(/^memory:(\d+):(\d+)$/);
+      // id 格式约定: memory:<timestamp>:<uuid>
+      const match = id.match(/^memory:(\d+):/);
       if (match) {
-        const timestamp = Number(match[2]);
+        const timestamp = Number(match[1]);
         if (Date.now() - timestamp > olderThanMs) {
           toDelete.push(id);
         }

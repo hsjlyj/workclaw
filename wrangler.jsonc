@@ -10,7 +10,7 @@
 
   "vars": {
     "OPENAI_BASE_URL": "https://new-api.abrdns.com/v1",
-    "CLAW_MODEL": "gemini-3.1-flash-lite",
+    "CLAW_MODEL": "@cf/meta/llama-3.1-8b-instruct",
     "CLAW_ENV": "production"
   },
 
