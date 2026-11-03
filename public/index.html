@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>workclaw 状态面板</title>
+<style>
+  :root { --bg: #0f172a; --card: #1e293b; --accent: #38bdf8; --text: #e2e8f0; --muted: #94a3b8; --green: #4ade80; --amber: #fbbf24; --red: #f87171; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 2rem; }
+  .header { text-align: center; margin-bottom: 2rem; }
+  .header h1 { font-size: 1.8rem; color: var(--accent); margin-bottom: .3rem; }
+  .header p { color: var(--muted); font-size: .9rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.2rem; max-width: 1100px; margin: 0 auto; }
+  .card { background: var(--card); border-radius: 12px; padding: 1.4rem; }
+  .card h3 { font-size: .85rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: .8rem; }
+  .stat { display: flex; justify-content: space-between; align-items: center; padding: .35rem 0; border-bottom: 1px solid rgba(255,255,255,.06); }
+  .stat:last-child { border-bottom: none; }
+  .stat span:first-child { color: var(--muted); font-size: .85rem; }
+  .stat span:last-child { font-weight: 600; font-size: .95rem; }
+  .badge { display: inline-block; padding: .15rem .55rem; border-radius: 999px; font-size: .75rem; font-weight: 600; }
+  .badge-green { background: rgba(74,222,128,.15); color: var(--green); }
+  .badge-amber { background: rgba(251,191,36,.15); color: var(--amber); }
+  .badge-red { background: rgba(248,113,113,.15); color: var(--red); }
+  .footer { text-align: center; margin-top: 2.5rem; color: var(--muted); font-size: .78rem; }
+  .uptime-bar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; margin-top: .5rem; }
+  .uptime-fill { height: 100%; border-radius: 3px; transition: width .4s; }
+  .mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: .82rem; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🦀 workclaw</h1>
+  <p>Cloudflare Workers · Telegram Bot · OpenAI-compatible API</p>
+</div>
+
+<div class="grid">
+  <!-- 运行状态 -->
+  <div class="card">
+    <h3>运行状态</h3>
+    <div class="stat"><span>服务状态</span><span class="badge badge-green" id="status-badge">加载中</span></div>
+    <div class="stat"><span>运行环境</span><span class="mono" id="env-label">—</span></div>
+    <div class="stat"><span>Worker 版本</span><span class="mono" id="worker-version">—</span></div>
+    <div style="margin-top:.6rem">
+      <div style="display:flex;justify-content:space-between;font-size:.8rem;color:var(--muted)"><span>系统可用性</span><span id="uptime-pct">—</span></div>
+      <div class="uptime-bar"><div class="uptime-fill" id="uptime-bar" style="width:0%;background:var(--green)"></div></div>
+    </div>
+  </div>
+
+  <!-- 会话统计 -->
+  <div class="card">
+    <h3>📊 会话统计</h3>
+    <div class="stat"><span>活跃会话</span><span id="active-sessions" class="mono">—</span></div>
+    <div class="stat"><span>总消息数</span><span id="total-messages" class="mono">—</span></div>
+    <div class="stat"><span>今日请求</span><span id="today-requests" class="mono">—</span></div>
+    <div class="stat"><span>缓存命中率</span><span id="cache-hit-rate" class="mono">—</span></div>
+  </div>
+
+  <!-- 资源使用 -->
+  <div class="card">
+    <h3>☁️ Cloudflare 资源</h3>
+    <div class="stat"><span>KV 读取</span><span id="kv-reads" class="mono">—</span></div>
+    <div class="stat"><span>KV 写入</span><span id="kv-writes" class="mono">—</span></div>
+    <div class="stat"><span>R2 存储</span><span id="r2-storage" class="mono">—</span></div>
+    <div class="stat"><span>AI 推理</span><span id="ai-usage" class="mono">—</span></div>
+    <div class="stat"><span>Vectorize 向量</span><span id="vector-count" class="mono">—</span></div>
+  </div>
+
+  <!-- 定时任务 -->
+  <div class="card">
+    <h3>⏰ 定时任务</h3>
+    <div class="stat"><span>提醒检查</span><span class="badge badge-green">每 5 分钟</span></div>
+    <div class="stat"><span>监控检查</span><span class="badge badge-green">每 5 分钟</span></div>
+    <div class="stat"><span>记忆整理</span><span class="badge badge-amber">每小时</span></div>
+    <div class="stat"><span>上次执行</span><span class="mono" id="last-cron">—</span></div>
+    <div class="stat"><span>下次执行</span><span class="mono" id="next-cron">—</span></div>
+  </div>
+</div>
+
+<div class="footer">
+  workclaw v1.0 · Powered by Cloudflare Workers · <span id="timestamp"></span>
+</div>
+
+<script>
+// 静态仪表盘 — 实际数据通过 Worker /api/status 提供
+document.getElementById('timestamp').textContent = new Date().toISOString().slice(0, 19) + ' UTC';
+
+// 尝试获取实时状态
+fetch('/api/status')
+  .then(r => r.json())
+  .then(d => {
+    document.getElementById('status-badge').textContent = '在线';
+    document.getElementById('status-badge').className = 'badge badge-green';
+    document.getElementById('env-label').textContent = d.env || 'production';
+    document.getElementById('worker-version').textContent = d.version || '—';
+    document.getElementById('active-sessions').textContent = d.activeSessions || '—';
+    document.getElementById('total-messages').textContent = d.totalMessages || '—';
+    document.getElementById('today-requests').textContent = d.todayRequests || '—';
+    document.getElementById('cache-hit-rate').textContent = (d.cacheHitRate || 0).toFixed(1) + '%';
+    document.getElementById('last-cron').textContent = d.lastCron || '—';
+    document.getElementById('next-cron').textContent = d.nextCron || '—';
+    const pct = Math.min(99.9, (d.uptime || 99.9));
+    document.getElementById('uptime-pct').textContent = pct + '%';
+    document.getElementById('uptime-bar').style.width = pct + '%';
+  })
+  .catch(() => {
+    document.getElementById('status-badge').textContent = '离线';
+    document.getElementById('status-badge').className = 'badge badge-red';
+  });
+</script>
+</body>
+</html>

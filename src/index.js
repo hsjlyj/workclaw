@@ -1,4 +1,26 @@
 import { CLAW_SYSTEM_PROMPT } from './generated/claw-prompts.js';
+import {
+  cacheSearchResult,
+  getCachedSearch,
+  cacheScrapedPage,
+  getCachedScrape,
+} from './kv-cache.js';
+import {
+  storePageSnapshot,
+  getPageSnapshot,
+  archiveConversationContext,
+} from './r2-storage.js';
+import {
+  generateWithAI,
+  summarizeWithAI,
+  generateEmbedding,
+  buildAISystemPrompt,
+} from './ai-inference.js';
+import {
+  upsertMemoryEmbedding,
+  searchMemories,
+  ensureVectorizeIndex,
+} from './vectorize-search.js';
 
 const JSON_HEADERS = {
   'content-type': 'application/json; charset=utf-8',
@@ -10,7 +32,7 @@ const OPENAI_STREAM_HEADERS = {
   'x-accel-buffering': 'no',
 };
 
-const DEFAULT_MODEL = 'claw-mini';
+const DEFAULT_MODEL = 'workclaw-mini';
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
 const TELEGRAM_MEMORY_RECENT_LIMIT = 6;
 const TELEGRAM_MEMORY_COMPACT_THRESHOLD = 8;
@@ -277,7 +299,7 @@ function buildTelegramConversationPreviewText(history = [], limit = 4) {
   return [
     '近期对话：',
     ...items.map((message) => {
-      const role = message?.role === 'assistant' ? 'claw' : message?.role === 'user' ? '你' : String(message?.role || '系统');
+      const role = message?.role === 'assistant' ? 'workclaw' : message?.role === 'user' ? '你' : String(message?.role || '系统');
       const text = truncateContextText(normalizeTelegramDisplayText(getMessageText(message)), 120);
       return `- ${role}：${text}`;
     }),
@@ -314,8 +336,6 @@ function normalizeTelegramSummaryText(text) {
 async function handleTelegramSlashCommand({ command, commandText = '', session, env, fetchImpl, chatId, replyMarkup }) {
   if (!command) return false;
 
-  // 先把斜杠命令拦下来，再决定是回帮助、回模型信息，还是返回占位提示。
-  // 这样 /foo 不会误入普通聊天分支，更不会被当成自然语言发给模型。
   switch (command) {
     case 'start':
     case 'help':
@@ -558,7 +578,7 @@ function buildTelegramReplyMarkup() {
 }
 
 function buildTelegramHelpText() {
-  // /start 和 /help 返回同一份说明，目的不是“讲故事”，而是让用户
+  // /start 和 /help 返回同一份说明，目的不是"讲故事"，而是让用户
   // 一眼知道有哪些命令、按钮各自负责什么，以及下一步该点哪里。
   const lines = [
     '发送消息，我会在当前对话里回复。',
@@ -584,7 +604,12 @@ function buildTelegramModelText(env) {
   // /model 只是只读查询：把当前模型、回复模式和是否开启流式返回给用户，
   // 不写入历史，不改变会话状态，也不触发新的推理。
   const model = getConfiguredModel(env);
-  const mode = getOpenAIBaseUrl(env) ? '上游 OpenAI 兼容接口' : '本地';
+  const hasUpstream = Boolean(getOpenAIBaseUrl(env));
+  const hasAI = Boolean(env?.WORKCLAW_AI);
+  let mode;
+  if (hasUpstream) mode = '上游 OpenAI 兼容接口';
+  else if (hasAI) mode = 'Workers AI（本机推理）';
+  else mode = '本地';
 
   return [
     `当前模型：${model}`,
@@ -599,12 +624,12 @@ function buildTelegramResetText() {
 }
 
 function buildTelegramThinkingText() {
-  // 先发“思考中”，再把模型输出逐段编辑进同一条消息。
+  // 先发"思考中"，再把模型输出逐段编辑进同一条消息。
   return '思考中...';
 }
 
 // 主动跟进只做轻量的一句，不抢主回复的戏。
-// 规则很克制：只有用户明显在提需求、而且回复里还没自己带出“要不要/如果你想”这类跟进语气时才发送。
+// 规则很克制：只有用户明显在提需求、而且回复里还没自己带出"要不要/如果你想"这类跟进语气时才发送。
 const TELEGRAM_PROACTIVE_FOLLOW_UP_RULES = Object.freeze([
   {
     patterns: [/readme/iu, /说明文档/iu, /文档结构/iu],
@@ -1172,7 +1197,6 @@ async function deliverDueTelegramReminders(session, env, fetchImpl) {
   }
 
   let remaining = reminders.slice();
-  // ponytail: per-reminder send+save keeps loss small; exact-once delivery needs receipts or a queue.
   for (const reminder of dueReminders) {
     await sendTelegramMessage(env, fetchImpl, chatId, buildTelegramReminderFiredText(reminder), {
       reply_markup: buildTelegramReplyMarkup(),
@@ -1413,7 +1437,6 @@ async function runTelegramAlarmTask(name, task) {
 function buildTelegramConversationMessages(messages, memories = [], webContext = '', sessionContext = {}) {
   const conversationMessages = Array.isArray(messages) ? messages : [];
   const contextMessages = [];
-  // 先注入 claw 的固定人格和项目偏好，再叠加会话记忆与本轮网页上下文。
   if (CLAW_SYSTEM_MESSAGE) {
     contextMessages.push(CLAW_SYSTEM_MESSAGE);
   }
@@ -1598,7 +1621,14 @@ async function readResponseTextWithLimit(response, maxChars = 50000) {
   return text.slice(0, maxChars);
 }
 
-async function searchWeb(fetchImpl, query) {
+// ── 带 KV 缓存的网络搜索 ──
+async function searchWeb(fetchImpl, query, env) {
+  // 优先读 KV 缓存
+  if (env?.WORKCLAW_CACHE) {
+    const cached = await getCachedSearch(env, query);
+    if (cached) return cached;
+  }
+
   const searchQuery = buildSearchQueryFromPrompt(query);
   if (!searchQuery) return [];
 
@@ -1608,7 +1638,7 @@ async function searchWeb(fetchImpl, query) {
     response = await fetchTextWithTimeout(fetchImpl, searchUrl, {
       headers: {
         accept: 'text/html,application/xhtml+xml',
-        'user-agent': 'Mozilla/5.0 (compatible; claw/1.0)',
+        'user-agent': 'Mozilla/5.0 (compatible; workclaw/1.0)',
       },
     });
   } catch {
@@ -1617,10 +1647,24 @@ async function searchWeb(fetchImpl, query) {
 
   if (!response?.ok) return [];
   const html = await readResponseTextWithLimit(response, 25000).catch(() => '');
-  return parseDuckDuckGoSearchResults(html, WEB_SEARCH_RESULT_LIMIT);
+  const results = parseDuckDuckGoSearchResults(html, WEB_SEARCH_RESULT_LIMIT);
+
+  // 写入 KV 缓存 (30 min TTL)
+  if (env?.WORKCLAW_CACHE && results.length > 0) {
+    await cacheSearchResult(env, query, results);
+  }
+
+  return results;
 }
 
-async function scrapeWebPage(fetchImpl, rawUrl) {
+// ── 带 KV/R2 缓存的网页抓取 ──
+async function scrapeWebPage(fetchImpl, rawUrl, env) {
+  // 优先读 KV 缓存
+  if (env?.WORKCLAW_CACHE) {
+    const cached = await getCachedScrape(env, rawUrl);
+    if (cached) return cached;
+  }
+
   let url;
   try {
     url = new URL(rawUrl);
@@ -1637,7 +1681,7 @@ async function scrapeWebPage(fetchImpl, rawUrl) {
     response = await fetchTextWithTimeout(fetchImpl, url.toString(), {
       headers: {
         accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
-        'user-agent': 'Mozilla/5.0 (compatible; claw/1.0)',
+        'user-agent': 'Mozilla/5.0 (compatible; workclaw/1.0)',
       },
     });
   } catch {
@@ -1655,11 +1699,19 @@ async function scrapeWebPage(fetchImpl, rawUrl) {
   );
   const text = truncateContextText(stripHtmlToText(rawText), 900);
 
-  return {
-    title,
-    url: url.toString(),
-    text,
-  };
+  const pageData = { title, url: url.toString(), text };
+
+  // 写入 KV 缓存 (60 min TTL)
+  if (env?.WORKCLAW_CACHE) {
+    await cacheScrapedPage(env, rawUrl, pageData);
+  }
+
+  // 大内容存 R2 (用于后续参考)
+  if (env?.WORKCLAW_ASSETS) {
+    await storePageSnapshot(env, rawUrl, rawText, 'text/html').catch(() => {});
+  }
+
+  return pageData;
 }
 
 function buildWebContextText({ searchQuery = '', searchResults = [], scrapedPages = [] } = {}) {
@@ -1689,7 +1741,7 @@ function buildWebContextText({ searchQuery = '', searchResults = [], scrapedPage
   return truncateContextText(sections.join('\n').trim(), WEB_CONTEXT_LIMIT);
 }
 
-async function prepareWebContext(prompt, fetchImpl) {
+async function prepareWebContext(prompt, fetchImpl, env) {
   const text = normalizeTelegramMemoryText(prompt);
   if (!text) return '';
 
@@ -1701,9 +1753,9 @@ async function prepareWebContext(prompt, fetchImpl) {
   }
 
   const [searchResults, scrapedPages] = await Promise.all([
-    searchQuery ? searchWeb(fetchImpl, searchQuery) : Promise.resolve([]),
+    searchQuery ? searchWeb(fetchImpl, searchQuery, env) : Promise.resolve([]),
     urls.length > 0
-      ? Promise.all(urls.map((url) => scrapeWebPage(fetchImpl, url))).then((pages) => pages.filter(Boolean))
+      ? Promise.all(urls.map((url) => scrapeWebPage(fetchImpl, url, env))).then((pages) => pages.filter(Boolean))
       : Promise.resolve([]),
   ]);
 
@@ -1712,6 +1764,37 @@ async function prepareWebContext(prompt, fetchImpl) {
     searchResults,
     scrapedPages,
   });
+}
+
+// ── Vectorize 语义记忆搜索 ──
+async function searchMemoriesWithVectorize(env, query, chatId) {
+  if (!env?.WORKCLAW_VECTORIZE) return [];
+
+  try {
+    const results = await searchMemories(env, query);
+    // 只返回同 chatId 的记忆
+    return results.filter((r) => {
+      if (!chatId) return true;
+      return r.metadata?.chatId === String(chatId) || r.metadata?.source === 'global';
+    }).slice(0, 3);
+  } catch {
+    return [];
+  }
+}
+
+async function indexMemoryInVectorize(env, memory) {
+  if (!env?.WORKCLAW_VECTORIZE || !memory?.text) return;
+
+  const memoryId = `memory:${memory.id || crypto.randomUUID()}`;
+  try {
+    await upsertMemoryEmbedding(env, memoryId, memory.text, {
+      chatId: memory.chatId || '',
+      source: memory.source || 'auto',
+      text: memory.text.slice(0, 500),
+    });
+  } catch (err) {
+    console.error('[Vectorize] index memory error:', err.message);
+  }
 }
 
 function normalizeTelegramMemoryText(text) {
@@ -1860,7 +1943,7 @@ function extractTelegramMemoryCandidates(prompt) {
   return candidates;
 }
 
-function captureAutomaticTelegramMemories(session, prompt) {
+async function captureAutomaticTelegramMemories(session, prompt, env) {
   const memoryCandidates = extractTelegramMemoryCandidates(prompt);
   if (memoryCandidates.length === 0) return [];
 
@@ -1873,11 +1956,20 @@ function captureAutomaticTelegramMemories(session, prompt) {
     if (seen.has(key)) continue;
     seen.add(key);
     const memory = createTelegramMemory(candidate.text, candidate.source);
+    memory.chatId = session.chatId;
     existing.push(memory);
     created.push(memory);
   }
 
   session.memories = compactTelegramMemories(existing);
+
+  // 异步索引到 Vectorize
+  if (env?.WORKCLAW_VECTORIZE) {
+    for (const memory of created) {
+      await indexMemoryInVectorize(env, memory).catch(() => {});
+    }
+  }
+
   return created;
 }
 
@@ -2027,9 +2119,43 @@ function shouldEditTelegramStream(rendered, lastEdited) {
   return String(rendered || '').length - String(lastEdited || '').length >= TELEGRAM_STREAM_EDIT_MIN_CHARS;
 }
 
+// ── 多路径回复生成 ──
+// 优先级: Workers AI > 上游 OpenAI API > 本地兜底
+async function generateReplyMultiPath(prompt, env, fetchImpl) {
+  // 路径1: Workers AI (零成本, 部署后即用)
+  if (env?.WORKCLAW_AI && !getOpenAIBaseUrl(env)) {
+    try {
+      const model = getConfiguredModel(env);
+      const response = await generateWithAI(
+        [{ role: 'system', content: CLAW_SYSTEM_PROMPT || '你是一个友好的 AI 助手。' }, { role: 'user', content: prompt }],
+        env,
+        { model, temperature: 0.7, maxTokens: 1024 }
+      );
+      if (response) return response;
+    } catch (err) {
+      console.error('[AI Inference] fallback to upstream/local:', err.message);
+    }
+  }
+
+  // 路径2: 上游 OpenAI 兼容 API
+  const baseUrl = getOpenAIBaseUrl(env);
+  if (baseUrl) {
+    const webContext = await prepareWebContext(prompt, fetchImpl, env);
+    const messages = buildTelegramConversationMessages([{ role: 'user', content: prompt }], [], webContext);
+    try {
+      return await generateConversationReply(messages, env, fetchImpl);
+    } catch (err) {
+      console.error('[Upstream API] error:', err.message);
+    }
+  }
+
+  // 路径3: 本地兜底
+  return buildLocalReply(prompt);
+}
+
 function buildLocalReply(prompt) {
   // ponytail: local echo fallback; replace with a real provider when OPENAI_BASE_URL is not set.
-  return prompt ? `claw: ${prompt}` : 'claw is ready.';
+  return prompt ? `workclaw: ${prompt}` : 'workclaw is ready.';
 }
 
 function buildChatCompletionsResponse({ model, content }) {
@@ -2128,7 +2254,7 @@ function buildModelsResponse(model) {
         id: model,
         object: 'model',
         created: 0,
-        owned_by: 'claw',
+        owned_by: 'workclaw',
       },
     ],
   });
@@ -2186,20 +2312,38 @@ async function generateConversationReply(messages, env, fetchImpl) {
 
 async function generateReply(prompt, env, fetchImpl) {
   const baseUrl = getOpenAIBaseUrl(env);
-  if (!baseUrl) {
+  if (!baseUrl && !env?.WORKCLAW_AI) {
     return buildLocalReply(prompt);
   }
 
-  const webContext = await prepareWebContext(prompt, fetchImpl);
+  const webContext = await prepareWebContext(prompt, fetchImpl, env);
   const messages = buildTelegramConversationMessages([{ role: 'user', content: prompt }], [], webContext);
-  return generateConversationReply(messages, env, fetchImpl);
+
+  // 优先使用上游 API
+  if (baseUrl) {
+    return generateConversationReply(messages, env, fetchImpl);
+  }
+
+  // 回退到 Workers AI
+  if (env?.WORKCLAW_AI) {
+    try {
+      const systemMsg = CLAW_SYSTEM_MESSAGE || { role: 'system', content: '你是一个友好的 AI 助手。' };
+      const aiMessages = [systemMsg, ...messages];
+      return await generateWithAI(aiMessages, env, { model: getConfiguredModel(env), temperature: 0.7 });
+    } catch (err) {
+      console.error('[AI Inference] error:', err.message);
+      return buildLocalReply(prompt);
+    }
+  }
+
+  return buildLocalReply(prompt);
 }
 
 async function streamConversationReply(messages, env, fetchImpl, onText) {
   const baseUrl = getOpenAIBaseUrl(env);
   const prompt = getLatestUserMessage(messages);
 
-  if (!baseUrl) {
+  if (!baseUrl && !env?.WORKCLAW_AI) {
     const content = buildLocalReply(prompt);
     let rendered = '';
     for (const chunk of splitTextForStreaming(content)) {
@@ -2209,67 +2353,95 @@ async function streamConversationReply(messages, env, fetchImpl, onText) {
     return content;
   }
 
-  const upstream = resolveUpstreamUrl(baseUrl, new URL('/v1/chat/completions', baseUrl));
-  const model = getConfiguredModel(env);
-  const response = await fetchImpl(upstream, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(env?.OPENAI_API_KEY ? { authorization: `Bearer ${env.OPENAI_API_KEY}` } : {}),
-    },
-    body: JSON.stringify({
-      model,
-      messages,
-      stream: true,
-    }),
-  });
+  // 优先使用上游 API 流式
+  if (baseUrl) {
+    const upstream = resolveUpstreamUrl(baseUrl, new URL('/v1/chat/completions', baseUrl));
+    const model = getConfiguredModel(env);
+    const response = await fetchImpl(upstream, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(env?.OPENAI_API_KEY ? { authorization: `Bearer ${env.OPENAI_API_KEY}` } : {}),
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: true,
+      }),
+    });
 
-  if (!response.ok || !response.body) {
-    return generateConversationReply(messages, env, fetchImpl);
-  }
+    if (!response.ok || !response.body) {
+      return generateConversationReply(messages, env, fetchImpl);
+    }
 
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let rendered = '';
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let rendered = '';
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    let frameIndex = buffer.indexOf('\n\n');
+      buffer += decoder.decode(value, { stream: true });
+      let frameIndex = buffer.indexOf('\n\n');
 
-    while (frameIndex !== -1) {
-      const frame = buffer.slice(0, frameIndex).trim();
-      buffer = buffer.slice(frameIndex + 2);
-      frameIndex = buffer.indexOf('\n\n');
+      while (frameIndex !== -1) {
+        const frame = buffer.slice(0, frameIndex).trim();
+        buffer = buffer.slice(frameIndex + 2);
+        frameIndex = buffer.indexOf('\n\n');
 
-      if (!frame) continue;
+        if (!frame) continue;
 
-      for (const line of frame.split('\n')) {
-        if (!line.startsWith('data:')) continue;
+        for (const line of frame.split('\n')) {
+          if (!line.startsWith('data:')) continue;
 
-        const data = line.slice(5).trim();
-        if (data === '[DONE]') return rendered || buildLocalReply(prompt);
+          const data = line.slice(5).trim();
+          if (data === '[DONE]') return rendered || buildLocalReply(prompt);
 
-        let payload;
-        try {
-          payload = JSON.parse(data);
-        } catch {
-          continue;
-        }
+          let payload;
+          try {
+            payload = JSON.parse(data);
+          } catch {
+            continue;
+          }
 
-        const delta = payload?.choices?.[0]?.delta?.content;
-        if (typeof delta === 'string' && delta) {
-          rendered += delta;
-          await onText(rendered, delta);
+          const delta = payload?.choices?.[0]?.delta?.content;
+          if (typeof delta === 'string' && delta) {
+            rendered += delta;
+            await onText(rendered, delta);
+          }
         }
       }
     }
+
+    return rendered || generateConversationReply(messages, env, fetchImpl);
   }
 
-  return rendered || generateConversationReply(messages, env, fetchImpl);
+  // 回退到 Workers AI (非流式)
+  if (env?.WORKCLAW_AI) {
+    try {
+      const systemMsg = CLAW_SYSTEM_MESSAGE || { role: 'system', content: '你是一个友好的 AI 助手。' };
+      const aiMessages = [systemMsg, ...messages];
+      const content = await generateWithAI(aiMessages, env, { model: getConfiguredModel(env), temperature: 0.7 });
+      let rendered = '';
+      for (const chunk of splitTextForStreaming(content)) {
+        rendered += chunk;
+        await onText(rendered, chunk);
+      }
+      return rendered || buildLocalReply(prompt);
+    } catch (err) {
+      console.error('[AI Stream] error:', err.message);
+    }
+  }
+
+  const content = buildLocalReply(prompt);
+  let rendered = '';
+  for (const chunk of splitTextForStreaming(content)) {
+    rendered += chunk;
+    await onText(rendered, chunk);
+  }
+  return content;
 }
 
 function getTelegramMessage(update) {
@@ -2286,8 +2458,6 @@ function getTelegramMessage(update) {
 }
 
 async function streamTelegramReply(env, fetchImpl, chatId, messageId, messages, fallbackPrompt, extra = {}, memories = [], webContext = '', sessionContext = {}) {
-  // 这一层把 OpenAI 风格的 SSE 增量翻译成 Telegram 的消息编辑。
-  // 有 messageId 就原地更新同一条消息；没有 messageId 就退回成一次性 sendMessage。
   let lastRendered = '';
   let lastEdited = '';
 
@@ -2311,10 +2481,6 @@ async function streamTelegramReply(env, fetchImpl, chatId, messageId, messages, 
 }
 
 async function generateAndStreamTelegramReply({ update, session, env, fetchImpl }) {
-  // Telegram 交互总入口：
-  // 1. 先处理显式命令 /start /help /model /reset；
-  // 2. 再处理按钮回调 callback_query；
-  // 3. 最后把普通文本当成用户提问，进入流式回复。
   const chatId = getTelegramChatId(update);
   if (chatId === null) {
     return json({ ok: true, ignored: true });
@@ -2342,15 +2508,12 @@ async function generateAndStreamTelegramReply({ update, session, env, fetchImpl 
   }
 
   if (update?.callback_query) {
-    // 按钮回调是第二条交互通道：用户点按钮时，Telegram 传的是 callback_data，
-    // 不是新的聊天文本，所以这里要把“按钮意图”单独分支处理。
     const callbackQueryId = getTelegramCallbackQueryId(update);
     const callbackData = getTelegramCallbackData(update);
     const callbackMessage = update.callback_query.message;
     const callbackMessageId = callbackMessage?.message_id;
 
     if (callbackData === 'help') {
-      // Help 按钮优先编辑原消息，减少刷屏；没有原消息时再退回新发一条。
       if (callbackQueryId) {
         await answerTelegramCallbackQuery(env, fetchImpl, callbackQueryId, '已打开帮助');
       }
@@ -2367,7 +2530,6 @@ async function generateAndStreamTelegramReply({ update, session, env, fetchImpl 
     }
 
     if (callbackData === 'reset') {
-      // Reset 按钮和 /reset 做同一件事：只清短期对话，不删除长期记忆。
       await resetTelegramConversation(session);
       if (callbackQueryId) {
         await answerTelegramCallbackQuery(env, fetchImpl, callbackQueryId, '会话已清空');
@@ -2385,9 +2547,7 @@ async function generateAndStreamTelegramReply({ update, session, env, fetchImpl 
     }
 
     if (callbackData === 'retry') {
-      // Retry 的语义是“重新用上一轮用户输入跑一次”，不是单纯重发旧文本。
       if (!session.lastPrompt) {
-        // 没有上一轮问题时，不能凭空重试，只能告诉用户先发一条消息。
         if (callbackQueryId) {
           await answerTelegramCallbackQuery(env, fetchImpl, callbackQueryId, '还没有可重试的上一条消息');
         }
@@ -2401,18 +2561,16 @@ async function generateAndStreamTelegramReply({ update, session, env, fetchImpl 
         await answerTelegramCallbackQuery(env, fetchImpl, callbackQueryId, '正在重新生成...');
       }
       if (callbackMessageId) {
-        // 先把旧消息改成“思考中”，让用户知道按钮已经生效。
         await editTelegramMessage(env, fetchImpl, chatId, callbackMessageId, buildTelegramThinkingText(), {
           reply_markup: buildTelegramReplyMarkup(),
         });
       }
 
-      // 去掉上一轮 assistant，保留用户问题，重新喂给模型。
       const history = trimTelegramHistory(session.history.slice());
       if (history[history.length - 1]?.role === 'assistant') {
         history.pop();
       }
-      const webContext = await prepareWebContext(session.lastPrompt, fetchImpl);
+      const webContext = await prepareWebContext(session.lastPrompt, fetchImpl, env);
       const replyText = await streamTelegramReply(
         env,
         fetchImpl,
@@ -2448,17 +2606,14 @@ async function generateAndStreamTelegramReply({ update, session, env, fetchImpl 
     return json({ ok: true, ignored: true });
   }
 
-  // 普通文本默认视为用户提问：先进历史，再发 typing 和占位消息，最后流式编辑这条占位消息。
   session.history.push({ role: 'user', content: prompt });
   session.history = trimTelegramHistory(session.history);
   session.lastPrompt = prompt;
-  // 隐式长期记忆不提供公开命令入口：只在消息像稳定事实或偏好时自动提取，再在保存时自动压缩。
-  captureAutomaticTelegramMemories(session, prompt);
+  await captureAutomaticTelegramMemories(session, prompt, env);
   await saveTelegramSession(session.storage, session);
 
-  const webContextPromise = prepareWebContext(prompt, fetchImpl);
+  const webContextPromise = prepareWebContext(prompt, fetchImpl, env);
   await sendTelegramChatAction(env, fetchImpl, chatId, 'typing');
-  // 占位消息是流式输出的锚点，后续每个增量都编辑这条消息。
   const placeholder = await sendTelegramMessage(env, fetchImpl, chatId, buildTelegramThinkingText(), {
     reply_markup: buildTelegramReplyMarkup(),
   });
@@ -2495,6 +2650,107 @@ async function generateAndStreamTelegramReply({ update, session, env, fetchImpl 
   return json({ ok: true, sent: true });
 }
 
+// ── Cron 调度入口 ──
+async function handleCronDispatch(env, ctx) {
+  const now = Date.now();
+  const minute = new Date(now).getMinutes();
+
+  // 每 5 分钟: 检查提醒和监控
+  if (minute % 5 === 0) {
+    await runTelegramAlarmTask('reminders', async () => {
+      const session = await loadTelegramSession(ctx?.storage);
+      session.storage = ctx?.storage;
+      await deliverDueTelegramReminders(session, env, fetch);
+      await scheduleTelegramReminderAlarm(session);
+      delete session.storage;
+    });
+
+    await runTelegramAlarmTask('watches', async () => {
+      const session = await loadTelegramSession(ctx?.storage);
+      session.storage = ctx?.storage;
+      await deliverDueTelegramWatches(session, env, fetch);
+      await scheduleTelegramReminderAlarm(session);
+      delete session.storage;
+    });
+  }
+
+  // 每小时: 记忆整理和过期清理
+  if (minute === 0) {
+    await runTelegramAlarmTask('memory-compact', async () => {
+      const session = await loadTelegramSession(ctx?.storage);
+      session.storage = ctx?.storage;
+      const before = session.memories?.length ?? 0;
+      session.memories = compactTelegramMemories(Array.isArray(session.memories) ? session.memories : []);
+      if (session.memories.length < before) {
+        await saveTelegramSession(session.storage, session);
+      }
+      delete session.storage;
+    });
+
+    // 清理过期 Vectorize 记忆 (保留 30 天)
+    if (env?.WORKCLAW_VECTORIZE) {
+      const deleted = await deleteExpiredMemories(env, 30 * 24 * 60 * 60 * 1000);
+      console.log(`[Vectorize] Cleaned up ${deleted} expired memory embeddings`);
+    }
+  }
+
+  return json({
+    ok: true,
+    triggeredAt: new Date(now).toISOString(),
+    tasks: ['reminders', 'watches', 'memory-compact'],
+  });
+}
+
+// ── 状态 API (供 Pages 仪表盘使用) ──
+async function handleStatusApi(env) {
+  const cacheInfo = env?.WORKCLAW_CACHE
+    ? { bound: true }
+    : { bound: false };
+  const r2Info = env?.WORKCLAW_ASSETS
+    ? { bound: true }
+    : { bound: false };
+  const aiInfo = env?.WORKCLAW_AI
+    ? { bound: true, models: ['@cf/meta/llama-3.1-8b-instruct'] }
+    : { bound: false };
+  const vectorizeInfo = env?.WORKCLAW_VECTORIZE
+    ? { bound: true, index: 'workclaw-memories' }
+    : { bound: false };
+
+  return json({
+    name: 'workclaw',
+    version: '1.0.0',
+    status: 'running',
+    env: env?.CLAW_ENV || 'development',
+    timestamp: new Date().toISOString(),
+    resources: {
+      cache: cacheInfo,
+      r2: r2Info,
+      ai: aiInfo,
+      vectorize: vectorizeInfo,
+      durableObjects: { bound: true, class: 'TelegramSession' },
+    },
+    features: [
+      'telegram-webhook',
+      'openai-compatible-api',
+      'streaming',
+      'web-search',
+      'web-scrape',
+      'long-term-memory',
+      'todos',
+      'reminders',
+      'watch',
+      'mode-switching',
+      'kv-cache',
+      'r2-storage',
+      'ai-inference',
+      'vectorize-search',
+      'cron-triggers',
+    ],
+  });
+}
+
+// ── DOOM ──
+
 async function handleTelegramWebhook(request, env, ctx, fetchImpl) {
   if (request.method !== 'POST') return methodNotAllowed('POST');
 
@@ -2523,11 +2779,7 @@ async function handleTelegramWebhook(request, env, ctx, fetchImpl) {
 
   const sessionBinding = env?.TELEGRAM_SESSION;
   if (sessionBinding?.idFromName && sessionBinding?.get) {
-    // 有 Durable Object 就按 chatId 串行化：同一个会话只走同一个对象，
-    // 这样按钮回调、重试和普通消息不会互相抢状态。
     const sessionStub = sessionBinding.get(sessionBinding.idFromName(String(chatId)));
-    // waitUntil 让 webhook 先快速返回，后台继续处理 Telegram 更新。
-    // 参考：https://developers.cloudflare.com/workers/runtime-apis/context/#waituntil
     const task = sessionStub
       .fetch('https://telegram-session.local/update', {
         method: 'POST',
@@ -2565,7 +2817,6 @@ async function handleTelegramWebhook(request, env, ctx, fetchImpl) {
     return json({ ok: true, sent: true, command });
   }
 
-  // 没有绑定 DO 时，保留一个同步回退，方便本地跑通和最小部署。
   const reply = await generateReply(text, env, fetchImpl);
   await sendTelegramMessage(env, fetchImpl, chatId, reply);
   await sendTelegramProactiveFollowUp({
@@ -2594,7 +2845,6 @@ export class TelegramSession {
       return json({ ok: false, error: 'invalid json' }, { status: 400 });
     }
 
-    // 一个 DO 代表一个 chat 的会话状态，避免同一对话并发写入时互相覆盖。
     const session = await loadTelegramSession(this.state.storage);
     session.storage = this.state.storage;
     const response = await generateAndStreamTelegramReply({
@@ -2620,6 +2870,8 @@ export class TelegramSession {
   }
 }
 
+// ── OpenAI 兼容接口 ──
+
 async function handleChatCompletions(request, env, fetchImpl) {
   if (request.method !== 'POST') return methodNotAllowed('POST');
 
@@ -2633,7 +2885,7 @@ async function handleChatCompletions(request, env, fetchImpl) {
   if (getOpenAIBaseUrl(env)) {
     const messages = Array.isArray(payload.messages) ? payload.messages : [];
     const prompt = getLatestUserMessage(messages);
-    const webContext = await prepareWebContext(prompt, fetchImpl);
+    const webContext = await prepareWebContext(prompt, fetchImpl, env);
     const augmentedMessages = buildTelegramConversationMessages(messages, [], webContext);
     const upstream = resolveUpstreamUrl(getOpenAIBaseUrl(env), new URL('/v1/chat/completions', getOpenAIBaseUrl(env)));
     const headers = new Headers(request.headers);
@@ -2657,20 +2909,29 @@ async function handleChatCompletions(request, env, fetchImpl) {
     return response;
   }
 
+  // 本地/AI 兜底
   const prompt = getLatestUserMessage(Array.isArray(payload.messages) ? payload.messages : []);
-  const content = buildLocalReply(prompt);
+  let content;
 
-  if (payload.stream) {
-    return buildChatCompletionsStreamResponse({
-      model,
-      content,
-    });
+  if (env?.WORKCLAW_AI) {
+    try {
+      content = await generateWithAI(
+        [{ role: 'system', content: CLAW_SYSTEM_PROMPT || '你是一个友好的助手。' }, ...payload.messages],
+        env,
+        { model, stream: false, temperature: 0.7 }
+      );
+    } catch {
+      content = buildLocalReply(prompt);
+    }
+  } else {
+    content = buildLocalReply(prompt);
   }
 
-  return buildChatCompletionsResponse({
-    model,
-    content,
-  });
+  if (payload.stream) {
+    return buildChatCompletionsStreamResponse({ model, content });
+  }
+
+  return buildChatCompletionsResponse({ model, content });
 }
 
 async function handleModels(request, env, fetchImpl) {
@@ -2683,12 +2944,14 @@ async function handleModels(request, env, fetchImpl) {
   return buildModelsResponse(getConfiguredModel(env));
 }
 
+// ── 主路由 ──
+
 async function handleRequest(request, env = {}, ctx = {}, fetchImpl = fetch) {
   const path = getPath(request);
 
   if (path === '/' || path === '/health') {
     return json({
-      name: 'claw',
+      name: 'workclaw',
       status: 'ok',
     });
   }
@@ -2707,6 +2970,16 @@ async function handleRequest(request, env = {}, ctx = {}, fetchImpl = fetch) {
     const authResponse = await authorizeOpenAIRequest(request, env);
     if (authResponse) return authResponse;
     return handleModels(request, env, fetchImpl);
+  }
+
+  // Cron 入口
+  if (path === '/cron/dispatch') {
+    return handleCronDispatch(env, ctx);
+  }
+
+  // 状态 API (Pages 仪表盘)
+  if (path === '/api/status') {
+    return handleStatusApi(env);
   }
 
   return notFound();

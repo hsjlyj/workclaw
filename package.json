@@ -1,15 +1,21 @@
 {
-  "name": "claw",
+  "name": "workclaw",
   "private": true,
   "type": "module",
   "scripts": {
-    "generate:prompts": "node scripts/generate-claw-prompts.mjs",
+    "generate:prompts": "node scripts/generate-workclaw-prompts.mjs",
     "predev": "npm run generate:prompts",
     "dev": "wrangler dev",
     "predeploy": "npm run generate:prompts",
     "deploy": "wrangler deploy",
     "pretest": "npm run generate:prompts",
-    "test": "node --test"
+    "test": "node --test",
+    "kv:create": "wrangler kv namespace create WORKCLAW_CACHE",
+    "r2:create": "wrangler r2 bucket create workclaw-assets",
+    "vectorize:create": "wrangler vectorize create workclaw-memories --dimensions=768 --metric=cosine",
+    "db:execute": "wrangler d1 execute workclaw-db --file=./tools/setup-d1.sql",
+    "pages:dev": "wrangler pages dev ./public",
+    "pages:deploy": "wrangler pages deploy ./public"
   },
   "devDependencies": {
     "wrangler": "4.114.0"

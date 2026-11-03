@@ -41,7 +41,7 @@ test('responds with a JSON health payload', async () => {
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('content-type'), 'application/json; charset=utf-8');
   assert.deepEqual(await response.json(), {
-    name: 'claw',
+    name: "workclaw",
     status: 'ok',
   });
 });
@@ -74,7 +74,7 @@ test('returns an OpenAI-compatible chat completion response', async () => {
   assert.equal(payload.object, 'chat.completion');
   assert.equal(payload.model, 'demo-model');
   assert.equal(payload.choices[0].message.role, 'assistant');
-  assert.equal(payload.choices[0].message.content, 'claw: hello');
+  assert.equal(payload.choices[0].message.content, 'workclaw: hello');
 });
 
 test('returns a streaming OpenAI-compatible chat completion response', async () => {
@@ -103,7 +103,7 @@ test('returns a streaming OpenAI-compatible chat completion response', async () 
   const text = await response.text();
   assert.match(text, /"object":"chat\.completion\.chunk"/);
   assert.match(text, /"role":"assistant"/);
-  assert.match(text, /"content":"claw: "/);
+  assert.match(text, /"content":"workclaw: "/);
   assert.match(text, /"content":"hello"/);
   assert.match(text, /data: \[DONE\]/);
 });
@@ -165,7 +165,7 @@ test('returns upstream OpenAI-compatible chat completions with web context injec
           [
             'data: {"choices":[{"delta":{"role":"assistant"}}]}',
             '',
-            'data: {"choices":[{"delta":{"content":"claw: "}}]}',
+            'data: {"choices":[{"delta":{"content":"workclaw: "}}]}',
             '',
             'data: {"choices":[{"delta":{"content":"search"}}]}',
             '',
@@ -266,7 +266,7 @@ test('returns a local OpenAI-compatible model list', async () => {
 
   const payload = await response.json();
   assert.equal(payload.object, 'list');
-  assert.equal(payload.data[0].id, 'claw-mini');
+  assert.equal(payload.data[0].id, 'workclaw-mini');
 });
 
 test('rejects telegram webhook requests when the secret token is not configured', async () => {
@@ -369,7 +369,7 @@ test('sends a telegram reply through the Bot API', async () => {
   const body = JSON.parse(calls[0].init.body);
   assert.deepEqual(body, {
     chat_id: 42,
-    text: 'claw: ping',
+    text: 'workclaw: ping',
   });
 });
 
@@ -404,7 +404,7 @@ test('telegram webhook injects soul.md before upstream replies when no DO is con
         upstreamBodies.push(JSON.parse(init.body));
         return new Response(
           JSON.stringify({
-            choices: [{ message: { content: 'claw: ping' } }],
+            choices: [{ message: { content: 'workclaw: ping' } }],
           }),
           {
             headers: {
@@ -436,7 +436,7 @@ test('telegram webhook injects soul.md before upstream replies when no DO is con
 
   const body = JSON.parse(telegramCalls[0].init.body);
   assert.equal(body.chat_id, 42);
-  assert.equal(body.text, 'claw: ping');
+  assert.equal(body.text, 'workclaw: ping');
 });
 
 test('queues telegram updates to a Durable Object when configured', async () => {
@@ -1299,7 +1299,7 @@ test('TelegramSession injects /mode and summary context into upstream replies', 
           [
             'data: {"choices":[{"delta":{"role":"assistant"}}]}',
             '',
-            'data: {"choices":[{"delta":{"content":"claw: "}}]}',
+            'data: {"choices":[{"delta":{"content":"workclaw: "}}]}',
             '',
             'data: {"choices":[{"delta":{"content":"ok"}}]}',
             '',
@@ -1576,7 +1576,7 @@ test('TelegramSession injects long-term memories into upstream requests', async 
           [
             'data: {"choices":[{"delta":{"role":"assistant"}}]}',
             '',
-            'data: {"choices":[{"delta":{"content":"claw: "}}]}',
+            'data: {"choices":[{"delta":{"content":"workclaw: "}}]}',
             '',
             'data: {"choices":[{"delta":{"content":"ping"}}]}',
             '',
@@ -1647,7 +1647,7 @@ test('TelegramSession injects long-term memories into upstream requests', async 
   assert.equal(upstreamBodies[0].messages.at(-1).content, 'ping');
 
   const edits = calls.filter((call) => String(call.input).endsWith('/editMessageText'));
-  assert.equal(JSON.parse(edits.at(-1).init.body).text, 'claw: ping');
+  assert.equal(JSON.parse(edits.at(-1).init.body).text, 'workclaw: ping');
 });
 
 test('TelegramSession injects web search and scrape context into upstream requests', async () => {
@@ -1695,7 +1695,7 @@ test('TelegramSession injects web search and scrape context into upstream reques
           [
             'data: {"choices":[{"delta":{"role":"assistant"}}]}',
             '',
-            'data: {"choices":[{"delta":{"content":"claw: "}}]}',
+            'data: {"choices":[{"delta":{"content":"workclaw: "}}]}',
             '',
             'data: {"choices":[{"delta":{"content":"search"}}]}',
             '',
@@ -1829,11 +1829,11 @@ test('TelegramSession streams a reply and stores the turn', async () => {
   assert.equal(JSON.parse(sendMessage.init.body).text, '思考中...');
 
   const edits = calls.filter((call) => String(call.input).endsWith('/editMessageText'));
-  assert.equal(JSON.parse(edits.at(-1).init.body).text, 'claw: ping');
+  assert.equal(JSON.parse(edits.at(-1).init.body).text, 'workclaw: ping');
 
   const stored = await storage.get('telegram-session');
   assert.equal(stored.lastPrompt, 'ping');
-  assert.equal(stored.lastReply, 'claw: ping');
+  assert.equal(stored.lastReply, 'workclaw: ping');
   assert.deepEqual(
     stored.history.map((message) => message.role),
     ['user', 'assistant'],
@@ -2208,11 +2208,11 @@ test('TelegramSession handles callback query resets', async () => {
     'telegram-session': {
       history: [
         { role: 'user', content: 'ping' },
-        { role: 'assistant', content: 'claw: ping' },
+        { role: 'assistant', content: 'workclaw: ping' },
       ],
       todos: ['买牛奶'],
       lastPrompt: 'ping',
-      lastReply: 'claw: ping',
+      lastReply: 'workclaw: ping',
     },
   });
 
