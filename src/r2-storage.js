@@ -8,13 +8,14 @@
  * R2 适合存储 KV 放不下的大块内容，配合 KV 的元数据索引使用。
  */
 
-import crypto from 'node:crypto';
-
 /**
  * 生成内容的 SHA-256 哈希 (用于 R2 键名)
  */
-function hashKey(input) {
-  return crypto.createHash('sha256').update(input).digest('hex').slice(0, 16);
+async function hashKey(input) {
+  const data = new TextEncoder().encode(input);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
 }
 
 /**
@@ -25,7 +26,7 @@ export async function storePageSnapshot(env, url, content, mimeType = 'text/plai
   if (!env?.WORKCLAW_ASSETS) return null;
 
   try {
-    const key = `snapshot:${hashKey(url)}`;
+    const key = `snapshot:${await hashKey(url)}`;
     const body = typeof content === 'string' ? new TextEncoder().encode(content) : content;
 
     await env.WORKCLAW_ASSETS.put(key, body, {
@@ -51,7 +52,7 @@ export async function getPageSnapshot(env, url) {
   if (!env?.WORKCLAW_ASSETS) return null;
 
   try {
-    const key = `snapshot:${hashKey(url)}`;
+    const key = `snapshot:${await hashKey(url)}`;
     const object = await env.WORKCLAW_ASSETS.get(key);
     if (!object) return null;
 

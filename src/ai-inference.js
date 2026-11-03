@@ -77,7 +77,7 @@ export async function generateEmbedding(text, env) {
   if (!env?.WORKCLAW_AI) return simpleTokenize(text);
 
   try {
-    const response = await env.WORKCLAW_AI.embeddings('@cf/baai/bge-small-en-v1.5', {
+    const response = await env.WORKCLAW_AI.embeddings('@cf/baai/bge-base-en-v1.5', {
       text: text,
     });
 
